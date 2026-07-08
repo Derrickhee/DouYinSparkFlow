@@ -58,26 +58,30 @@ def safe_filename(value):
     return value or "account"
 
 
-def save_debug_artifacts(page, username, reason):
-    """保存失败现场，便于在 GitHub Actions artifact 中判断页面状态。"""
+def save_page_artifacts(page, username, reason, prefix_name):
     os.makedirs("logs", exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    prefix = f"logs/failure-{safe_filename(username)}-{stamp}-{safe_filename(reason)}"
+    prefix = f"logs/{prefix_name}-{safe_filename(username)}-{stamp}-{safe_filename(reason)}"
     screenshot_path = f"{prefix}.png"
     html_path = f"{prefix}.html"
 
     try:
         page.screenshot(path=screenshot_path, full_page=True)
-        logger.info(f"账号 {username} 已保存失败截图: {screenshot_path}")
+        logger.info(f"账号 {username} 已保存页面截图: {screenshot_path}")
     except Exception as e:
-        logger.warning(f"账号 {username} 保存失败截图失败: {e}")
+        logger.warning(f"账号 {username} 保存页面截图失败: {e}")
 
     try:
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(page.content())
-        logger.info(f"账号 {username} 已保存失败页面 HTML: {html_path}")
+        logger.info(f"账号 {username} 已保存页面 HTML: {html_path}")
     except Exception as e:
-        logger.warning(f"账号 {username} 保存失败页面 HTML 失败: {e}")
+        logger.warning(f"账号 {username} 保存页面 HTML 失败: {e}")
+
+
+def save_debug_artifacts(page, username, reason):
+    """保存失败现场，便于在 GitHub Actions artifact 中判断页面状态。"""
+    save_page_artifacts(page, username, reason, "failure")
 
 
 def log_page_snapshot(page, username, reason):
@@ -431,11 +435,22 @@ def input_contains_message(chat_input, message):
 
 
 def verify_message_sent(page, chat_input, message, previous_count, username, friend_name):
-    deadline = time.time() + 10
+    # 给前端和网络请求一点时间；太快检查容易把输入框回显误判成消息气泡。
+    time.sleep(3)
+    deadline = time.time() + 12
     while time.time() < deadline:
         try:
             count = message_occurrence_count(page, message)
-            if count > previous_count and not input_contains_message(chat_input, message):
+            input_still_has_message = input_contains_message(chat_input, message)
+            send_error_count = page.locator(
+                'xpath=//*[contains(normalize-space(), "发送失败") or contains(normalize-space(), "重试") or contains(normalize-space(), "风险") or contains(normalize-space(), "频繁")]'
+            ).count()
+            if send_error_count > 0:
+                logger.error(f"账号 {username} 页面出现疑似发送失败/风控提示，好友: {friend_name}")
+                save_debug_artifacts(page, username, f"send-error-{friend_name}")
+                return False
+            if count > previous_count and not input_still_has_message:
+                save_page_artifacts(page, username, f"sent-{friend_name}", "sent")
                 logger.info(f"账号 {username} 发送后已检测到新消息出现在聊天记录中，好友: {friend_name}")
                 return True
         except Exception:
@@ -487,6 +502,7 @@ def do_user_task(browser, username, cookies, targets):
 
             chat_input = get_chat_input(page, username)
             message = build_message()
+            logger.info(f"账号 {username} 本次消息长度: {len(message)}，预览: {message[:30]!r}")
             previous_message_count = message_occurrence_count(page, message)
             lines = message.split("\n")
             for index, line in enumerate(lines):
