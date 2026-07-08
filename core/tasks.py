@@ -92,14 +92,25 @@ def log_page_snapshot(page, username, reason):
 def normalize_match_value(value):
     value = str(value or "")
     value = value.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
-    value = re.sub(r"\s+", "", value.strip())
+    value = value.strip()
+    for _ in range(2):
+        value = value.strip().strip("\"'`[](){}")
+    value = re.sub(r"\s+", "", value)
     if matchMode == "short_id" and value.startswith("@"):
         value = value[1:]
     return value.casefold()
 
 
 def normalize_targets(targets):
-    return {str(target).strip() for target in targets if str(target).strip()}
+    if isinstance(targets, str):
+        raw_targets = [part for part in targets.split(",")]
+    else:
+        raw_targets = targets
+    return {
+        str(target).strip().strip("\"'`[](){}")
+        for target in raw_targets
+        if str(target).strip().strip("\"'`[](){}")
+    }
 
 
 def build_target_lookup(targets):
@@ -143,13 +154,13 @@ def first_attached_selector(page, selectors, timeout=1500):
 
 def find_scrollable_friend_container(page):
     selectors = [
+        'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/ul/div',
         "css=#sub-app .semi-list-items",
         "css=#sub-app [class*='semi-list'] ul",
         "css=#sub-app [class*='conversation']",
         "css=#sub-app [class*='chat'] ul",
         'xpath=//*[@id="sub-app"]//ul/ancestor::div[.//div[contains(@class, "semi-list-item-body")]][1]',
         'xpath=//*[@id="sub-app"]//div[.//ul][@style or contains(@class, "scroll")][1]',
-        'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/ul/div',
     ]
 
     for selector in selectors:
@@ -193,14 +204,15 @@ def scroll_and_select_user(page, username, targets):
         raise Exception(f"账号 {username} 未配置 targets，停止执行")
 
     friends_tab_selectors = [
+        'xpath=//*[@id="sub-app"]/div/div/div[1]/div[2]',
         'xpath=//*[@id="sub-app"]//*[normalize-space()="好友"]',
         'xpath=//*[@id="sub-app"]//*[contains(normalize-space(), "好友") and (self::div or self::span or self::button)]',
         'xpath=//*[contains(@class, "semi-tabs-tab") and .//*[contains(normalize-space(), "好友")]]',
         'xpath=//*[contains(@class, "semi-tabs-tab") and contains(normalize-space(), "好友")]',
         'text=/^好友$/',
-        'xpath=//*[@id="sub-app"]/div/div/div[1]/div[2]',
     ]
     target_selectors = [
+        'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]//div[contains(@class, "semi-list-item-body semi-list-item-body-flex-start")]',
         "css=#sub-app .semi-list-item-body.semi-list-item-body-flex-start",
         "css=#sub-app .semi-list-item-body",
         "css=#sub-app li[class*='semi-list-item']",
@@ -208,15 +220,14 @@ def scroll_and_select_user(page, username, targets):
         "css=#sub-app [class*='chat'] li",
         'xpath=//*[@id="sub-app"]//div[contains(@class, "semi-list-item-body") and contains(@class, "semi-list-item-body-flex-start")]',
         'xpath=//*[@id="sub-app"]//li[.//span[normalize-space()]]',
-        'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]//div[contains(@class, "semi-list-item-body semi-list-item-body-flex-start")]',
     ]
     first_friend_selectors = [
+        'xpath=//*[@id="sub-app"]/div/div/div[2]/div[2]/div/div/div[1]/div/div/div/ul/div/div/div[1]/li/div',
         "css=#sub-app .semi-list-item:first-child",
         "css=#sub-app li[class*='semi-list-item']:first-child",
         "css=#sub-app [class*='conversation'] [class*='item']:first-child",
         'xpath=//*[@id="sub-app"]//li[contains(@class, "semi-list-item")][1]',
         'xpath=//*[@id="sub-app"]//li[.//span[normalize-space()]][1]',
-        'xpath=//*[@id="sub-app"]/div/div/div[2]/div[2]/div/div/div[1]/div/div/div/ul/div/div/div[1]/li/div',
     ]
     no_more_selector = 'xpath=//*[contains(@class, "no-more-tip-") or contains(normalize-space(), "没有更多") or contains(normalize-space(), "到底") or contains(normalize-space(), "暂无更多")]'
     loading_selector = 'xpath=//*[contains(@class, "semi-spin") or contains(normalize-space(), "加载中")]'
@@ -240,7 +251,7 @@ def scroll_and_select_user(page, username, targets):
             raise Exception(f"账号 {username} 找不到好友标签页，也未检测到好友/聊天列表，页面结构可能变化或未进入消息页")
 
     try:
-        first_friend, first_friend_selector = first_visible_locator(page, first_friend_selectors, timeout=config["browserTimeout"])
+        first_friend, first_friend_selector = first_visible_locator(page, first_friend_selectors, timeout=8000)
         first_friend.click()
         logger.info(f"账号 {username} 已激活好友列表，使用选择器: {first_friend_selector}")
     except Exception:
@@ -495,7 +506,13 @@ def do_user_task(browser, username, cookies, targets):
 
             time.sleep(2)
 
-        missing_after_send = normalize_targets(targets) - set(sent_targets)
+        target_lookup = build_target_lookup(targets)
+        sent_target_keys = {normalize_match_value(target) for target in sent_targets}
+        missing_after_send = {
+            original_target
+            for normalized, original_target in target_lookup.items()
+            if normalized not in sent_target_keys
+        }
         if failed_targets or missing_after_send:
             logger.error(
                 f"账号 {username} 任务未完成，发送失败或未确认目标: "
