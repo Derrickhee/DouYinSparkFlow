@@ -89,8 +89,26 @@ def log_page_snapshot(page, username, reason):
     logger.info(f"账号 {username} 页面快照({reason}) URL={page.url} title={page.title()} body={compact_text}")
 
 
+def normalize_match_value(value):
+    value = str(value or "")
+    value = value.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    value = re.sub(r"\s+", "", value.strip())
+    if matchMode == "short_id" and value.startswith("@"):
+        value = value[1:]
+    return value.casefold()
+
+
 def normalize_targets(targets):
     return {str(target).strip() for target in targets if str(target).strip()}
+
+
+def build_target_lookup(targets):
+    lookup = {}
+    for target in normalize_targets(targets):
+        normalized = normalize_match_value(target)
+        if normalized:
+            lookup[normalized] = target
+    return lookup
 
 
 def first_visible_locator(page, selectors, timeout=3000):
@@ -170,8 +188,8 @@ def target_symbol_for_friend(friend_name):
 
 def scroll_and_select_user(page, username, targets):
     """滚动并选择目标好友；目标没找到时抛错，避免 workflow 静默成功。"""
-    targets = normalize_targets(targets)
-    if not targets:
+    target_lookup = build_target_lookup(targets)
+    if not target_lookup:
         raise Exception(f"账号 {username} 未配置 targets，停止执行")
 
     friends_tab_selectors = [
@@ -203,7 +221,8 @@ def scroll_and_select_user(page, username, targets):
     no_more_selector = 'xpath=//*[contains(@class, "no-more-tip-") or contains(normalize-space(), "没有更多") or contains(normalize-space(), "到底") or contains(normalize-space(), "暂无更多")]'
     loading_selector = 'xpath=//*[contains(@class, "semi-spin") or contains(normalize-space(), "加载中")]'
 
-    logger.info(f"账号 {username} 当前目标列表: {sorted(targets)}，匹配模式: {matchMode}")
+    logger.info(f"账号 {username} 当前目标列表: {sorted(target_lookup.values())}，匹配模式: {matchMode}")
+    logger.info(f"账号 {username} 规范化目标键: {sorted(target_lookup.keys())}")
     logger.info(f"账号 {username} 准备点击好友标签页")
 
     try:
@@ -232,7 +251,7 @@ def scroll_and_select_user(page, username, targets):
 
     found_friends = set()
     selected_targets = set()
-    remaining_targets = set(targets)
+    remaining_targets = dict(target_lookup)
     empty_scroll_count = 0
     max_empty_scrolls = 10
 
@@ -266,18 +285,19 @@ def scroll_and_select_user(page, username, targets):
 
                 found_friends.add(friend_name)
                 target_symbol = target_symbol_for_friend(friend_name)
+                normalized_symbol = normalize_match_value(target_symbol)
                 logger.info(
                     f"账号 {username} 找到好友: {friend_name}"
-                    + (f"，ShortId: {target_symbol}" if target_symbol else "")
+                    + (f"，ShortId: {target_symbol}，规范化: {normalized_symbol}" if target_symbol else "")
                 )
 
-                if target_symbol in remaining_targets:
+                if normalized_symbol in remaining_targets:
+                    original_target = remaining_targets.pop(normalized_symbol)
                     element.click()
-                    selected_targets.add(target_symbol)
-                    remaining_targets.remove(target_symbol)
+                    selected_targets.add(original_target)
                     matched_this_round = True
-                    logger.info(f"账号 {username} 选中目标好友 {friend_name}，目标标识: {target_symbol}")
-                    yield {"friend_name": friend_name, "target": target_symbol}
+                    logger.info(f"账号 {username} 选中目标好友 {friend_name}，目标标识: {original_target}")
+                    yield {"friend_name": friend_name, "target": original_target}
 
                     if not remaining_targets:
                         logger.info(f"账号 {username} 所有目标好友均已找到: {sorted(selected_targets)}")
@@ -331,9 +351,9 @@ def scroll_and_select_user(page, username, targets):
 
     logger.info(f"账号 {username} 本次扫描找到好友: {sorted(found_friends)}")
     logger.info(f"账号 {username} 已找到目标: {sorted(selected_targets)}")
-    logger.error(f"账号 {username} 未找到目标: {sorted(remaining_targets)}")
+    logger.error(f"账号 {username} 未找到目标: {sorted(remaining_targets.values())}")
     save_debug_artifacts(page, username, "missing-targets")
-    raise Exception(f"账号 {username} 未找到目标好友: {sorted(remaining_targets)}")
+    raise Exception(f"账号 {username} 未找到目标好友: {sorted(remaining_targets.values())}")
 
 
 def get_chat_input(page, username):
