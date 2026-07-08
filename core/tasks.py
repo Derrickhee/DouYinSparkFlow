@@ -22,9 +22,7 @@ userIDDict = {}
 
 
 def handle_response(response: Response):
-    """
-    只监听你要的那个接口响应
-    """
+    """只监听你要的那个接口响应。"""
     global userIDDict
     if "aweme/v1/creator/im/user_detail/" in response.url:
         try:
@@ -43,15 +41,6 @@ def handle_response(response: Response):
 
 
 def retry_operation(name, operation, retries=3, delay=2, *args, **kwargs):
-    """
-    通用的重试逻辑
-    :param name: 操作名称（用于日志记录）
-    :param operation: 要执行的异步操作
-    :param retries: 最大重试次数
-    :param delay: 每次重试之间的延迟（秒）
-    :param args: 传递给操作的参数
-    :param kwargs: 传递给操作的关键字参数
-    """
     for attempt in range(retries):
         try:
             return operation(*args, **kwargs)
@@ -66,7 +55,7 @@ def retry_operation(name, operation, retries=3, delay=2, *args, **kwargs):
 
 def safe_filename(value):
     value = re.sub(r"[^0-9A-Za-z_.-]+", "-", str(value)).strip("-")
-    return value or "unknown"
+    return value or "account"
 
 
 def save_debug_artifacts(page, username, reason):
@@ -89,6 +78,15 @@ def save_debug_artifacts(page, username, reason):
         logger.info(f"账号 {username} 已保存失败页面 HTML: {html_path}")
     except Exception as e:
         logger.warning(f"账号 {username} 保存失败页面 HTML 失败: {e}")
+
+
+def log_page_snapshot(page, username, reason):
+    try:
+        body_text = page.locator("body").inner_text(timeout=2000)
+        compact_text = " ".join(body_text.split())[:500]
+    except Exception as e:
+        compact_text = f"读取页面文本失败: {e}"
+    logger.info(f"账号 {username} 页面快照({reason}) URL={page.url} title={page.title()} body={compact_text}")
 
 
 def normalize_targets(targets):
@@ -114,11 +112,25 @@ def click_first_visible(page, selectors, description, username, timeout=3000):
     return locator
 
 
+def first_attached_selector(page, selectors, timeout=1500):
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            locator.wait_for(state="attached", timeout=timeout)
+            return selector
+        except Exception:
+            continue
+    return None
+
+
 def find_scrollable_friend_container(page):
     selectors = [
         "css=#sub-app .semi-list-items",
         "css=#sub-app [class*='semi-list'] ul",
+        "css=#sub-app [class*='conversation']",
+        "css=#sub-app [class*='chat'] ul",
         'xpath=//*[@id="sub-app"]//ul/ancestor::div[.//div[contains(@class, "semi-list-item-body")]][1]',
+        'xpath=//*[@id="sub-app"]//div[.//ul][@style or contains(@class, "scroll")][1]',
         'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/ul/div',
     ]
 
@@ -164,6 +176,7 @@ def scroll_and_select_user(page, username, targets):
 
     friends_tab_selectors = [
         'xpath=//*[@id="sub-app"]//*[normalize-space()="好友"]',
+        'xpath=//*[@id="sub-app"]//*[contains(normalize-space(), "好友") and (self::div or self::span or self::button)]',
         'xpath=//*[contains(@class, "semi-tabs-tab") and .//*[contains(normalize-space(), "好友")]]',
         'xpath=//*[contains(@class, "semi-tabs-tab") and contains(normalize-space(), "好友")]',
         'text=/^好友$/',
@@ -171,12 +184,20 @@ def scroll_and_select_user(page, username, targets):
     ]
     target_selectors = [
         "css=#sub-app .semi-list-item-body.semi-list-item-body-flex-start",
+        "css=#sub-app .semi-list-item-body",
+        "css=#sub-app li[class*='semi-list-item']",
+        "css=#sub-app [class*='conversation'] [class*='item']",
+        "css=#sub-app [class*='chat'] li",
         'xpath=//*[@id="sub-app"]//div[contains(@class, "semi-list-item-body") and contains(@class, "semi-list-item-body-flex-start")]',
+        'xpath=//*[@id="sub-app"]//li[.//span[normalize-space()]]',
         'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]//div[contains(@class, "semi-list-item-body semi-list-item-body-flex-start")]',
     ]
     first_friend_selectors = [
         "css=#sub-app .semi-list-item:first-child",
+        "css=#sub-app li[class*='semi-list-item']:first-child",
+        "css=#sub-app [class*='conversation'] [class*='item']:first-child",
         'xpath=//*[@id="sub-app"]//li[contains(@class, "semi-list-item")][1]',
+        'xpath=//*[@id="sub-app"]//li[.//span[normalize-space()]][1]',
         'xpath=//*[@id="sub-app"]/div/div/div[2]/div[2]/div/div/div[1]/div/div/div/ul/div/div/div[1]/li/div',
     ]
     no_more_selector = 'xpath=//*[contains(@class, "no-more-tip-") or contains(normalize-space(), "没有更多") or contains(normalize-space(), "到底") or contains(normalize-space(), "暂无更多")]'
@@ -186,10 +207,18 @@ def scroll_and_select_user(page, username, targets):
     logger.info(f"账号 {username} 准备点击好友标签页")
 
     try:
-        click_first_visible(page, friends_tab_selectors, "点击好友标签页", username, timeout=8000)
-    except Exception:
-        save_debug_artifacts(page, username, "friends-tab-not-found")
-        raise Exception(f"账号 {username} 找不到好友标签页，页面结构可能变化或未进入消息页")
+        click_first_visible(page, friends_tab_selectors, "点击好友标签页", username, timeout=5000)
+    except Exception as e:
+        log_page_snapshot(page, username, "friends-tab-not-found")
+        list_selector = first_attached_selector(page, first_friend_selectors + target_selectors, timeout=3000)
+        if list_selector:
+            logger.warning(
+                f"账号 {username} 未找到好友标签页，但检测到好友/聊天列表元素，"
+                f"将跳过标签页点击继续处理。列表选择器: {list_selector}，错误: {e}"
+            )
+        else:
+            save_debug_artifacts(page, username, "friends-tab-not-found")
+            raise Exception(f"账号 {username} 找不到好友标签页，也未检测到好友/聊天列表，页面结构可能变化或未进入消息页")
 
     try:
         first_friend, first_friend_selector = first_visible_locator(page, first_friend_selectors, timeout=config["browserTimeout"])
@@ -388,14 +417,14 @@ def verify_message_sent(page, chat_input, message, previous_count, username, fri
 
 
 def do_user_task(browser, username, cookies, targets):
-    context = browser.new_context()  # 每个任务使用独立的上下文
-    context.set_default_navigation_timeout(config["browserTimeout"])  # 设置导航超时时间为 120 秒
-    context.set_default_timeout(config["browserTimeout"])  # 设置所有操作的默认超时时间为 120 秒
+    context = browser.new_context()
+    context.set_default_navigation_timeout(config["browserTimeout"])
+    context.set_default_timeout(config["browserTimeout"])
 
     page = context.new_page()
 
     try:
-        if matchMode == "short_id":  # 使用抖音号进行匹配
+        if matchMode == "short_id":
             page.on("response", handle_response)
 
         retry_operation(
@@ -462,7 +491,7 @@ def do_user_task(browser, username, cookies, targets):
         save_debug_artifacts(page, username, "task-error")
         raise
     finally:
-        context.close()  # 任务完成后关闭上下文
+        context.close()
 
 
 def runTasks():
@@ -478,7 +507,7 @@ def runTasks():
         for user in userData:
             cookies = user["cookies"]
             targets = user["targets"]
-            complates[user["unique_id"]] = []  # 初始化该用户的已完成列表
+            complates[user["unique_id"]] = []
             username = user.get("username", "未知用户")
             logger.info(f"开始处理账号 {username}")
             do_user_task(browser, username, cookies, targets)
