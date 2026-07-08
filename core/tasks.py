@@ -411,13 +411,25 @@ def click_send_button_or_press_enter(page, chat_input, username, friend_name):
     return "enter"
 
 
+def normalize_message_text(value):
+    return re.sub(r"\s+", "", str(value or ""))
+
+
 def message_occurrence_count(page, message):
     return page.evaluate(
         """
         (message) => {
-            const text = document.body ? document.body.innerText : '';
             if (!message) return 0;
-            return text.split(message).length - 1;
+            const normalize = (value) => (value || '').replace(/\\s+/g, '');
+            const root = document.body ? document.body.cloneNode(true) : null;
+            if (!root) return 0;
+            root.querySelectorAll(
+                'textarea,input,[contenteditable="true"],[class*="chat-input-"],[class*="input"]'
+            ).forEach((node) => node.remove());
+            const text = normalize(root.innerText);
+            const normalizedMessage = normalize(message);
+            if (!normalizedMessage) return 0;
+            return text.split(normalizedMessage).length - 1;
         }
         """,
         message,
@@ -425,11 +437,12 @@ def message_occurrence_count(page, message):
 
 
 def input_contains_message(chat_input, message):
+    normalized_message = normalize_message_text(message)
     try:
-        return message in chat_input.inner_text(timeout=500)
+        return normalized_message in normalize_message_text(chat_input.inner_text(timeout=500))
     except Exception:
         try:
-            return message in chat_input.input_value(timeout=500)
+            return normalized_message in normalize_message_text(chat_input.input_value(timeout=500))
         except Exception:
             return False
 
@@ -451,8 +464,16 @@ def verify_message_sent(page, chat_input, message, previous_count, username, fri
                 return False
             if count > previous_count and not input_still_has_message:
                 save_page_artifacts(page, username, f"sent-{friend_name}", "sent")
-                logger.info(f"账号 {username} 发送后已检测到新消息出现在聊天记录中，好友: {friend_name}")
+                logger.info(
+                    f"账号 {username} 发送后已检测到新消息出现在聊天记录中，好友: {friend_name}，"
+                    f"发送前出现次数: {previous_count}，发送后出现次数: {count}，输入框已清空"
+                )
                 return True
+            logger.info(
+                f"账号 {username} 等待发送确认，好友: {friend_name}，"
+                f"发送前出现次数: {previous_count}，当前出现次数: {count}，"
+                f"输入框仍含消息: {input_still_has_message}"
+            )
         except Exception:
             pass
         time.sleep(0.5)
@@ -511,7 +532,9 @@ def do_user_task(browser, username, cookies, targets):
                     chat_input.press("Shift+Enter")
 
             logger.info(f"账号 {username} 已给好友 {friend_name} 输入消息，准备发送")
+            save_page_artifacts(page, username, f"before-send-{friend_name}", "send-before")
             send_method = click_send_button_or_press_enter(page, chat_input, username, friend_name)
+            save_page_artifacts(page, username, f"after-send-action-{friend_name}", "send-after-action")
             logger.info(f"账号 {username} 发送动作已执行，方式: {send_method}，好友: {friend_name}")
 
             if verify_message_sent(page, chat_input, message, previous_message_count, username, friend_name):
